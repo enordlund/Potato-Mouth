@@ -1,0 +1,700 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Diff</key>
+	<array>
+		<dict>
+			<key>ModifiedContent</key>
+			<string>import Foundation
+import Combine
+import SwiftUI
+import SceneKit
+import ARKit
+
+import PlaygroundSupport
+
+// allowing asynchronous operations
+PlaygroundPage.current.needsIndefiniteExecution = true
+
+
+
+enum PotatoMode {
+    case loading
+    case placement
+    case placed
+    case intro
+    case menu
+    case sing
+}
+
+class Consciousness: ObservableObject {
+    @Published var thought: String? = nil
+    var nextThought: String? = nil
+    
+    func think(something: String) {
+        thought = something
+    }
+}
+
+class Brain: NSObject, ObservableObject {
+    @Published var consciousness: Consciousness
+    private var thoughtSubscriber: AnyCancellable?
+    
+    @Published var isSpeaking = false
+    @Published var speech: String? = nil
+    
+    @Published var mode: PotatoMode = .loading
+    
+    private let voice = AVSpeechSynthesizer()
+    
+    @Published var 👂🏻: TunerEngine
+    private var earSubsciber: AnyCancellable?
+    
+    @Published var potatoIsFrozen = false
+    let billboardConstraint = SCNBillboardConstraint()
+    
+    let sceneView = ARSCNView()
+    private var switchMode: PotatoMode? = nil
+    
+    override init() {
+        self.consciousness = Consciousness()
+        self.👂🏻 = TunerEngine(maxCents: 50, tolerance: 3)
+        super.init()
+        voice.delegate = self
+        sceneView.delegate = self
+        
+        self.thoughtSubscriber = self.consciousness.$thought.sink{ newThought in
+            print(newThought)
+            // check to see if it's changing to the first instance since the last stream
+            if newThought != nil &amp;&amp; self.isSpeaking == false {
+                self.speak(something: newThought!)
+            } else {
+                // if already speaking, any potential nextThought will be caught in AVSpeechSynthesizerDelegate's didFinish call
+                self.consciousness.nextThought = newThought
+            }
+            
+        }
+        
+        👂🏻.objectWillChange.receive(subscriber: Subscribers.Sink(receiveCompletion: { _ in }, receiveValue: {self.objectWillChange.send()}))
+    }
+    
+    func say(something: String, switchMode: PotatoMode?) {
+        self.switchMode = switchMode
+        self.consciousness.think(something: something)
+    }
+    
+    func speak(something: String) {
+        self.isSpeaking = true
+        self.speech = something
+        self.consciousness.thought = nil
+        
+        let utterance = AVSpeechUtterance(string: something)
+        
+        self.voice.speak(utterance)
+        
+    }
+}
+
+extension Brain: AVSpeechSynthesizerDelegate {
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        speech = nil
+        
+        if consciousness.nextThought != nil {
+            print(consciousness.nextThought)
+            speak(something: consciousness.nextThought!)
+            consciousness.nextThought = nil
+        } else {
+            isSpeaking = false
+            speech = nil
+            if switchMode != nil {
+                mode = switchMode!
+                switchMode = nil
+            }
+        }
+    }
+}
+
+extension Brain: ARSCNViewDelegate {
+    func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
+        guard let planeAnchor = anchor as? ARPlaneAnchor else {return}
+        if mode == .placement {
+            // display detected planes
+            let planeGeometry = planeAnchor.geometry
+            
+            guard let metalDevice = MTLCreateSystemDefaultDevice() else {return}
+            let plane = ARSCNPlaneGeometry(device: metalDevice)
+            plane?.update(from: planeGeometry)
+            
+            plane?.firstMaterial?.diffuse.contents = UIColor(displayP3Red: 0.361, green: 0.251, blue: 0.2, alpha: 1)
+            
+            node.name = "soil"
+            node.opacity = 0.8
+            node.geometry = plane
+        } else {
+            // removing any extra plane nodes that come in after mode changes
+            // seems to help prevent crashing for a longer period of time, despite turning off plane detection...
+            node.removeFromParentNode()
+        }
+    }
+    
+    func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        if mode != .loading &amp;&amp; mode != .placement {
+            self.aimPotato()
+            
+        }
+    }
+    
+    
+    func aimPotato() {
+        if let potatoNode = sceneView.scene.rootNode.childNode(withName: "potato", recursively: false) {
+            if self.potatoIsFrozen {
+                potatoNode.constraints = []
+            } else {
+                potatoNode.constraints = [billboardConstraint]
+            }
+        }
+    }
+}
+
+var 🧠 = Brain()
+
+
+
+
+struct ContentView: View {
+    @EnvironmentObject var 🧠: Brain
+    
+    var body: some View {
+        ZStack {
+            
+            ARView() { location in
+                if self.🧠.mode == .placement {
+                    // place the potato if the mode is placement, using the location based on user tapping screen
+                    let hits = self.🧠.sceneView.hitTest(location, types: .existingPlaneUsingExtent)
+                    
+                    if let closest = hits.first {
+                        // add the baby potato underground
+                        let potatoPosition = SCNVector3Make(closest.worldTransform.columns.3.x, closest.worldTransform.columns.3.y - 0.5, closest.worldTransform.columns.3.z)
+                        let potatoNode = self.makePotatoNode()
+                        potatoNode.position = potatoPosition
+                        potatoNode.scale = SCNVector3(x: 0.1, y: 0.1, z: 0.1)
+                        
+                        
+                        // position the sprout above ground
+                        let sproutNode = self.makeSproutNode()
+                        let sproutPosition = SCNVector3Make(closest.worldTransform.columns.3.x, closest.worldTransform.columns.3.y + Float((sproutNode.geometry as! SCNCone).height / 2), closest.worldTransform.columns.3.z)
+                        sproutNode.position = sproutPosition
+                        
+                        // add nodes to the scene
+                        self.🧠.sceneView.scene.rootNode.addChildNode(potatoNode)
+                        self.🧠.sceneView.scene.rootNode.addChildNode(sproutNode)
+                        
+                        // stop looking for more dirt
+                        let configuration = ARWorldTrackingConfiguration()
+                        configuration.environmentTexturing = .automatic
+                        self.🧠.sceneView.session.run(configuration)
+                        
+                        // move on to next stage of app
+                        self.🧠.mode = .placed
+                    }
+                }
+            }
+            
+            // overlay depends on mode
+            Group {
+                if 🧠.mode == .placement {
+                    PlacementView()
+                } else if 🧠.mode == .intro {
+                    IntroView()
+                } else if 🧠.mode == .menu {
+                    MenuView()
+                } else if 🧠.mode == .sing {
+                    SingView()
+                }
+            }
+            
+            // subtitles will automatically appear if the brain speaks
+            SubtitlesView()
+        }
+        
+    }
+    
+    
+    
+    // functions for building potato and sprout nodes
+    func potatoMaterials(withContents: SKScene?) -&gt; [SCNMaterial] {
+        let material = SCNMaterial()
+        material.diffuse.contents = withContents ?? UIColor.brown
+        material.roughness.contents = SCNMaterialProperty(contents: NSNumber(0.5))
+        material.metalness.contents = SCNMaterialProperty(contents: NSNumber(1))
+        material.reflective.contents = true
+        material.selfIllumination.contents = 1
+        material.lightingModel = .physicallyBased
+        
+        return [material]
+    }
+    
+    func potatoSprite() -&gt; SKScene {
+        let spriteScene = SKScene(size: CGSize(width: 1300.0, height: 1000.0))
+        
+        let backgroundNode = SKSpriteNode(color: UIColor.brown, size: spriteScene.size)
+        backgroundNode.position = CGPoint(x: spriteScene.size.width/2.0, y: spriteScene.size.height/2.0)
+        spriteScene.addChild(backgroundNode)
+        
+        let mouthNode = makeMouthNode()
+        mouthNode.position = CGPoint(x: spriteScene.size.width/2.0, y: spriteScene.size.height/2.0 + 100.0)
+        mouthNode.name = "mouth"
+        spriteScene.addChild(mouthNode)
+        
+        
+        let leftEyeNode = makeEyeNode()
+        leftEyeNode.position = CGPoint(x: spriteScene.size.width/2.0 - 60.0, y: spriteScene.size.height/2.0 - 100.0)
+        leftEyeNode.name = "left eye"
+        spriteScene.addChild(leftEyeNode)
+        
+        let rightEyeNode = makeEyeNode()
+        rightEyeNode.position = CGPoint(x: spriteScene.size.width/2.0 + 60.0, y: spriteScene.size.height/2.0 - 100.0)
+        rightEyeNode.name = "right eye"
+        spriteScene.addChild(rightEyeNode)
+        
+        return spriteScene
+    }
+    
+    func makeEyeNode() -&gt; SKShapeNode {
+        let path = CGMutablePath()
+        path.addArc(center: CGPoint.zero, radius: 30, startAngle: 0, endAngle: 2*CGFloat.pi, clockwise: true)
+        
+        let eye = SKShapeNode(path: path)
+        eye.lineWidth = 5
+        eye.fillColor = .black
+        eye.strokeColor = .black
+        
+        return eye
+    }
+    
+    func makeMouthNode() -&gt; SKShapeNode {
+        let path = CGMutablePath()
+        path.addArc(center: CGPoint.zero, radius: 60, startAngle: 0, endAngle: CGFloat.pi, clockwise: false)
+        path.addLine(to: CGPoint(x: 60, y: 0))
+        
+        let mouth = SKShapeNode(path: path)
+        mouth.lineWidth = 10
+        mouth.fillColor = .white
+        mouth.strokeColor = .black
+        
+        return mouth
+        
+    }
+    
+    
+    func makePotatoNode() -&gt; SCNNode {
+        let potato = SCNCapsule(capRadius: 0.05, height: 0.2)
+        
+        potato.materials = potatoMaterials(withContents: potatoSprite())
+        
+        let potatoNode = SCNNode(geometry: potato)
+        potatoNode.name = "potato"
+        
+        return potatoNode
+    }
+    
+    
+    
+    func makeSproutNode() -&gt; SCNNode {
+        let sprout = SCNCone(topRadius: 0.02, bottomRadius: 0.001, height: 0.2)
+        
+        sprout.materials = sproutMaterials()
+        let sproutNode = SCNNode(geometry: sprout)
+        sproutNode.name = "sprout"
+        sproutNode.opacity = 1
+        
+        return sproutNode
+    }
+    
+    func sproutMaterials() -&gt; [SCNMaterial] {
+        let material = SCNMaterial()
+        material.diffuse.contents = UIColor.green
+        material.roughness.contents = SCNMaterialProperty(contents: NSNumber(0.5))
+        material.metalness.contents = SCNMaterialProperty(contents: NSNumber(1))
+        material.reflective.contents = true
+        material.selfIllumination.contents = 1
+        material.lightingModel = .physicallyBased
+        
+        return [material]
+    }
+}
+
+
+struct ARView: UIViewRepresentable {
+    @EnvironmentObject var 🧠: Brain
+    
+    // sceneView is now in the brain to use delegate functions
+    private let scene = SCNScene()
+    
+    // detecting taps for placement
+    var tappedCallback: ((CGPoint) -&gt; Void)
+    class Coordinator: NSObject {
+        var tappedCallback: ((CGPoint) -&gt; Void)
+        init(tappedCallback: @escaping ((CGPoint) -&gt; Void)) {
+            self.tappedCallback = tappedCallback
+        }
+        
+        @objc func tapped(gesture: UITapGestureRecognizer) {
+            let point = gesture.location(in: gesture.view)
+            self.tappedCallback(point)
+        }
+    }
+    func makeCoordinator() -&gt; ARView.Coordinator {
+        return Coordinator(tappedCallback: self.tappedCallback)
+    }
+    
+    
+    func makeUIView(context: Context) -&gt; ARSCNView {
+        // for detecting planting tap in .placement mode
+        let gesture = UITapGestureRecognizer(target: context.coordinator, 
+                                             action: #selector(Coordinator.tapped))
+        🧠.sceneView.addGestureRecognizer(gesture)
+        
+        // initializing the scene
+        🧠.sceneView.scene = scene
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.environmentTexturing = .automatic
+        configuration.planeDetection = .horizontal
+        🧠.sceneView.session.run(configuration)
+        
+        return 🧠.sceneView
+    }
+    
+    func updateUIView(_ uiView: ARSCNView, context: Context) {
+        if 🧠.mode == .loading {
+            // once everything's loaded, start placement
+            🧠.mode = .placement
+        } else if 🧠.mode == .placement {
+            // this is where the user is "planting" the potato in the "soil" (attaching to a plane node).
+            // waiting for tap to move to .placed.
+        } else if 🧠.mode == .placed {
+            // wait 3 seconds dramatic reveal
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: {
+                self.revealPotato(uiView)
+                self.🧠.mode = .intro
+            })
+        } else if 🧠.mode == .intro {
+            // set the closed-mouth potato appearance
+            restorePotatoMouth(uiView)
+            // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ This only works every other time. Figure out what needs to be waited for.
+            //              startHover(uiView)
+        } else if 🧠.mode == .sing {
+            // manage potato's facial expressions in response to input pitch
+            // more in-tune corresponds to bigger smile
+            let mouthScalar = 1.0 - CGFloat(abs((🧠.👂🏻.uiState?.cents ?? 35.7)/50.0))// 35.7/50 default so the mouth isn't microscopic when closed.
+            
+            let mouthAction = SKAction.scaleY(to: mouthScalar, duration: 0.01)// adjust mouth
+            let mouthColor = {🧠.👂🏻.uiState != nil ? UIColor.white : UIColor.black}()// white when open for teeth
+            
+            // apply the action to the potato
+            updatePotatoMouth(action: mouthAction, color: mouthColor, uiView)
+        } else {
+            // close potato mouth for menu
+            restorePotatoMouth(uiView)
+        }
+    }
+    
+    
+    
+    func restorePotatoMouth(_ uiView: ARSCNView) {
+        let mouthAction = SKAction.scaleY(to: 2.0/7.0, duration: 0.01)// closed mouth values
+        
+        // apply the action to the potato
+        updatePotatoMouth(action: mouthAction, color: .black, uiView)
+    }
+    
+    func updatePotatoMouth(action: SKAction, color: UIColor, _ uiView: ARSCNView) {
+        let action = SCNAction.run({ node in
+            if let mouthNode = (node.geometry?.firstMaterial?.diffuse.contents as? SKScene)?.childNode(withName: "mouth") {
+                // keep actions from piling up by removing previous commands
+                SCNTransaction.begin()
+                mouthNode.removeAllActions()
+                mouthNode.run(action)
+                SCNTransaction.commit()
+                
+                // change mouth color at end of animation (helps with appearance when mouth closes)
+                if let mouthShape = (mouthNode as? SKShapeNode) {
+                    DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + action.duration, execute: {
+                        SCNTransaction.begin()
+                        mouthShape.fillColor = color
+                        SCNTransaction.commit()
+                    })
+                }
+                
+            }
+        })
+        
+        if let potatoNode = uiView.scene.rootNode.childNode(withName: "potato", recursively: false) {
+            SCNTransaction.begin()
+            potatoNode.runAction(action)
+            SCNTransaction.commit()
+        }
+        
+    }
+    
+    // shoot potato up to height, and scale to full size (from initial baby scale underground)
+    func revealPotato(_ uiView: ARSCNView) {
+        
+        
+        
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0.5
+        uiView.scene.rootNode.childNode(withName: "potato", recursively: false)?.scale = SCNVector3(x: 1.0, y: 1.0, z: 1.0)
+        uiView.scene.rootNode.childNode(withName: "potato", recursively: false)?.position.y = 0.0
+        SCNTransaction.commit()
+        
+        uiView.scene.rootNode.childNode(withName: "sprout", recursively: false)?.removeFromParentNode()
+        
+    }
+    
+}
+
+
+// View displays subtitles of brain speech while brain is speaking
+struct SubtitlesView: View {
+    @EnvironmentObject var 🧠: Brain
+    
+    var body: some View {
+        VStack {
+            Spacer()
+            
+            if self.🧠.speech != nil {
+                HStack {
+                    Spacer()
+                    
+                    Text(self.🧠.speech!)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                    
+                    Spacer()
+                }
+                .background(Color(.systemBackground).opacity(0.8))
+                .cornerRadius(12)
+                .padding()
+            } else {
+                EmptyView()
+            }
+        }
+    }
+}
+
+
+// View displays instructions for planting the potato
+struct PlacementView: View {
+    @EnvironmentObject var 🧠: Brain
+    
+    @State var showExplanation = false
+    
+    var body: some View {
+        VStack {
+            Spacer()
+            
+            Text("Howdy, farmer! Tap on some soil to plant your potato!")
+                .padding()
+                .background(Color(.systemBackground))
+                .cornerRadius(12)
+                .padding()
+                .onAppear {
+                    self.prepExplanation()
+            }
+            
+            // explanation appears if user doesn't plant the potato in five seconds
+            if showExplanation {
+                Text("Soil will appear on detected surfaces. It might help to move around!")
+                    .padding()
+                    .background(Color(.systemBackground))
+                    .cornerRadius(12)
+                    .padding([.leading, .bottom, .trailing])
+            }
+        }
+    }
+    
+    func prepExplanation() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: {
+            withAnimation {
+                self.showExplanation = true
+            }
+        })
+    }
+}
+
+
+// View provides menu options of entering the mouth-movement mode, and freezing/unfreezing billboardconstraint on potato
+struct MenuView: View {
+    @EnvironmentObject var 🧠: Brain
+    
+    var body: some View {
+        VStack {
+            Spacer()
+            
+            HStack {
+                Spacer()
+                
+                ModeButton(label: "I'm Ready!", mode: .sing)
+                
+                Spacer()
+            }.padding()
+        }
+    }
+}
+
+
+// View is an empty placeholder for the intro mode that initializes the intro speech
+struct IntroView: View {
+    @EnvironmentObject var 🧠: Brain
+    
+    var body: some View {
+        VStack {
+            EmptyView()
+        }.onAppear {
+            self.🧠.say(something: "Hi, I'm Potato! I'm enjoying life above ground already.", switchMode: nil)
+            self.🧠.say(something: "You can animate my mouth with your voice. Let me know when you're ready!", switchMode: .menu)
+        }
+    }
+}
+
+
+// View for mouth-movement mode
+struct SingView: View {
+    @EnvironmentObject var brain: Brain // not using the emoji, because the slider wasn't liking it
+    
+    let notesArray = [" A ", " B♭", " B ", " C ", " D♭", " D ", " E♭", " E ", " F ", " G♭", " G ", " A♭"]
+    
+    var body: some View {
+        VStack {
+            Spacer()
+                .layoutPriority(2.0)
+            
+            HStack (alignment: .bottom) {
+                FreezeButton()// toggle potato camera-tracking
+                
+                Spacer()
+                
+                // frequency &amp; hertz displays, and sensitivity slider
+                VStack(alignment: .center, spacing: 0.0) {
+                    VStack {
+                        HStack {
+                            Text("Input Sensitivity")
+                            
+                            Spacer()
+                        }
+                        
+                        Slider(value: $brain.👂🏻.inputSensitivity, in: (-1000000) ... (-100))
+                            .layoutPriority(-1.0)// keeps panel to the right (gives preference to spacer)
+                    }.padding()
+                    
+                }
+                .background(Color(.systemBackground).opacity(0.8))
+                .cornerRadius(12)
+                .frame(minWidth: nil, idealWidth: 300.0, maxWidth: 400.0, minHeight: nil, idealHeight: nil, maxHeight: nil, alignment: .center)
+                
+            }.padding()
+            
+            
+        }.onAppear {
+            // start listening for input when this view appears.
+            self.brain.👂🏻.start()
+        }
+    }
+    
+    // converts frequency float to a string of length 6 (including decimal)
+    // helps with consistent display width
+    func frequencyDisplay(hertz: Float) -&gt; String {
+        var uiFrequency = String(roundf(hertz * 100) / 100)
+        let radixDistance = uiFrequency.distance(of: ".")
+        let frequencyLength = uiFrequency.count
+        if radixDistance != nil {
+            uiFrequency = String(uiFrequency.dropLast(frequencyLength - radixDistance! - 2))
+        }
+        
+        while uiFrequency.count &lt; 6 {
+            uiFrequency = " " + uiFrequency
+        }
+        
+        return uiFrequency
+    }
+}
+
+
+// Button switches mode when pressed
+struct ModeButton: View {
+    @EnvironmentObject var 🧠: Brain
+    @State var label: String
+    @State var mode: PotatoMode
+    
+    var body: some View {
+        Button(action: {
+            self.🧠.mode = self.mode
+        }) {
+            Text(self.label)
+                .padding()
+        }.background(Color(.systemBackground).opacity(0.8))
+            .cornerRadius(8.0)
+        
+    }
+}
+
+// Button toggles billboardconstraint on potato
+struct FreezeButton: View {
+    @EnvironmentObject var 🧠: Brain
+    
+    var body: some View {
+        Button(action: {
+            self.🧠.potatoIsFrozen.toggle()
+        }) {
+            Group {
+                if 🧠.potatoIsFrozen == true {
+                    Text("Look At Me!")
+                } else {
+                    Text("Stop Creepin!")
+                }
+            }
+            .padding()
+        }.background(Color(.systemBackground).opacity(0.8))
+            .cornerRadius(8.0)
+        
+    }
+    
+}
+
+// Back button to return to main menu
+struct MenuButton: View {
+    @EnvironmentObject var 🧠: Brain
+    
+    var body: some View {
+        Button(action: {
+            self.🧠.mode = .menu
+            self.🧠.👂🏻.stop()
+        }) {
+            HStack {
+                Image(systemName: "chevron.left.circle.fill")
+                Text("Menu")
+            }.padding()
+            
+        }.background(Color(.systemBackground).opacity(0.8))
+            .cornerRadius(8.0)
+    }
+}
+
+
+// ContentView is root view
+PlaygroundPage.current.setLiveView(ContentView().environmentObject(🧠))
+</string>
+			<key>ModifiedRange</key>
+			<string>{1, 23182}</string>
+			<key>OriginalContent</key>
+			<string></string>
+			<key>OriginalRange</key>
+			<string>{1, 0}</string>
+		</dict>
+	</array>
+	<key>File</key>
+	<string>Chapters/Chapter1.playgroundchapter/Pages/My Playground.playgroundpage/main.swift</string>
+</dict>
+</plist>
